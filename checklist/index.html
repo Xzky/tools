@@ -128,6 +128,7 @@ button{cursor:pointer;background:none;border:0;padding:0}
 .row-input{flex:1;min-width:0;background:transparent;border:0;outline:none;padding:10px 6px;font-size:15px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-stretch:94%}
 .row-input::placeholder{color:var(--faint);text-transform:none;letter-spacing:0;font-weight:400}
 .row .iconbtn{flex-shrink:0}
+.daytag{flex-shrink:0;font:500 10.5px/1 var(--font-mono);letter-spacing:.08em;color:var(--accent);text-transform:uppercase;padding:6px 8px;border-radius:999px;border:1px solid var(--line-strong);white-space:nowrap}
 .edit-actions{display:flex;flex-wrap:wrap;gap:10px}
 .hint{color:var(--muted);font-size:13px;line-height:1.45}
 
@@ -215,13 +216,19 @@ const SVG = {
 
 /* ---------- Data model ---------- */
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
-const blankState = () => ({v:1, lists:[], settings:{theme:"ultra", accent:null, timeoutMin:120}, lastActivity:null, lastResetAt:null, updatedAt:0});
+const blankState = () => ({v:1, lists:[], settings:{theme:"ultra", accent:null, timeoutMin:120}, lastActivity:null, lastResetAt:null, updatedAt:0, migrations:[]});
+const DAY_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const DAY_ORDER = [1,2,3,4,5,6,0];
+const normDays = d => { if (!Array.isArray(d)) return null; const x = [...new Set(d.map(Number).filter(n => n >= 0 && n <= 6))]; return x.length && x.length < 7 ? x.sort() : null; };
+const dayLabel = d => d && d.length ? DAY_ORDER.filter(n => d.includes(n)).map(n => DAY_SHORT[n]).join(" ") : "";
+const today = () => new Date().getDay();
+const showsToday = i => !i.days || i.days.includes(today());
 function normalize(d){
   const s = blankState();
   if (!d || typeof d !== "object") return s;
   s.lists = Array.isArray(d.lists) ? d.lists.filter(l => l && l.id).map(l => ({
     id:String(l.id), name:String(l.name ?? ""), icon:String(l.icon ?? ""),
-    items:Array.isArray(l.items) ? l.items.filter(i => i && i.id).map(i => ({id:String(i.id), text:String(i.text ?? ""), done:!!i.done, doneAt:i.done ? Number(i.doneAt) || 0 : null})) : []
+    items:Array.isArray(l.items) ? l.items.filter(i => i && i.id).map(i => ({id:String(i.id), text:String(i.text ?? ""), done:!!i.done, doneAt:i.done ? Number(i.doneAt) || 0 : null, days:normDays(i.days)})) : []
   })) : [];
   const st = d.settings || {};
   s.settings.theme = THEMES.some(t => t.id === st.theme) ? st.theme : "ultra";
@@ -230,14 +237,16 @@ function normalize(d){
   s.lastActivity = Number(d.lastActivity) || null;
   s.lastResetAt = Number(d.lastResetAt) || null;
   s.updatedAt = Number(d.updatedAt) || 0;
+  s.migrations = Array.isArray(d.migrations) ? d.migrations.map(String) : [];
   return s;
 }
 const getList = (id, s = S) => s.lists.find(l => l.id === id);
 const resetItems = l => { if (l) l.items.forEach(i => { i.done = false; i.doneAt = null; }); };
 const anyDone = () => S.lists.some(l => l.items.some(i => i.done));
-const pendingOf = l => l.items.filter(i => !i.done);
-const doneOf = l => l.items.filter(i => i.done).sort((a, b) => a.doneAt - b.doneAt);
-const countDone = l => l.items.reduce((n, i) => n + (i.done ? 1 : 0), 0);
+const visibleOf = l => l.items.filter(showsToday);
+const pendingOf = l => visibleOf(l).filter(i => !i.done);
+const doneOf = l => visibleOf(l).filter(i => i.done).sort((a, b) => a.doneAt - b.doneAt);
+const countDone = l => visibleOf(l).reduce((n, i) => n + (i.done ? 1 : 0), 0);
 
 /* ---------- Store: device cache + shared cloud document ---------- */
 let S = blankState();
@@ -289,18 +298,34 @@ function setSync(v){
 }
 
 const DEFAULT_LISTS = [
-  {name:"Morning routine", icon:"☀️", items:["adri prepare breakfast","adri prepare coffee and tea","kids make the bed","kids Brush teeth, wash face","kids change clothes","kids eat breakfast","adri prepare snack","adri prepare water bottle","adri comb hairs","adri puts sunscreen"]},
+  {name:"Morning routine", icon:"☀️", items:["adri prepare breakfast","adri prepare coffee and tea","kids make the bed","kids Brush teeth, wash face","kids change clothes","kids eat breakfast","adri prepare snack","adri prepare water bottle","adri comb hairs","adri puts sunscreen",{text:"Anton Roller Skates", days:[2]},{text:"Anton Flute", days:[4]}]},
   {name:"Leaving the house", icon:"🔑", items:["Keys","Wallet","Phone","Laptop and charger","Lights off","Windows closed","Door locked"]},
   {name:"Bedtime", icon:"🌙", items:["Kids pajamas","Kids brush teeth","School bags ready","Clothes for tomorrow","Phones charging","Front door locked"]}
 ];
+/* One-time additions to existing saved data (run once per browser, never re-added if deleted later) */
+const MIGRATIONS = ["anton-weekday-items"];
+function migrate(){
+  if (!S.migrations.includes("anton-weekday-items")) {
+    commit(s => {
+      const l = s.lists.find(x => /morning/i.test(x.name)) || s.lists[0];
+      if (l) [["Anton Roller Skates", [2]], ["Anton Flute", [4]]].forEach(([text, days]) => {
+        const it = l.items.find(i => i.text.trim().toLowerCase() === text.toLowerCase());
+        if (it) it.days = days; else l.items.push({id:uid(), text, done:false, doneAt:null, days});
+      });
+      s.migrations.push("anton-weekday-items");
+    });
+  }
+}
 function connect(){
   // Standalone version: everything is saved in this browser only.
   let stored = null;
   try { stored = localStorage.getItem(LS_STATE); } catch (e) {}
   if (!stored) {
-    S.lists = DEFAULT_LISTS.map(l => ({id:uid(), name:l.name, icon:l.icon, items:l.items.map(text => ({id:uid(), text, done:false, doneAt:null}))}));
+    S.lists = DEFAULT_LISTS.map(l => ({id:uid(), name:l.name, icon:l.icon, items:l.items.map(x => typeof x === "string" ? {id:uid(), text:x, done:false, doneAt:null, days:null} : {id:uid(), text:x.text, done:false, doneAt:null, days:normDays(x.days)})}));
+    S.migrations = [...MIGRATIONS];
     S.updatedAt = Date.now(); saveLocal();
   }
+  migrate();
   setSync("local");
 }
 
@@ -385,7 +410,7 @@ function homeHTML(){
       <button class="btn primary" data-action="newList">${SVG.plus}New checklist</button></div></main>`;
   }
   const tiles = S.lists.map(l => {
-    const n = l.items.length, d = countDone(l), pct = n ? Math.round(d / n * 100) : 0;
+    const n = visibleOf(l).length, d = countDone(l), pct = n ? Math.round(d / n * 100) : 0;
     return `<div class="tile ${n && d === n ? "complete" : ""}" data-id="${esc(l.id)}" ${arrange ? "" : `data-action="open" role="button" tabindex="0"`} aria-label="${esc(l.name || "Untitled")}, ${d} of ${n} done">
       <div class="tile-top"><span class="tile-ico">${esc(l.icon)}</span>
         ${arrange ? `<span class="handle" data-drag aria-label="Drag to reorder">${SVG.drag}</span>` : `<button class="tile-more" data-action="tileMenu" data-id="${esc(l.id)}" aria-label="Options for ${esc(l.name)}">${SVG.more}</button>`}
@@ -400,7 +425,7 @@ function homeHTML(){
 }
 
 function listHTML(l){
-  const n = l.items.length, d = countDone(l), pct = n ? Math.round(d / n * 100) : 0;
+  const n = visibleOf(l).length, d = countDone(l), pct = n ? Math.round(d / n * 100) : 0;
   const pend = pendingOf(l), done = doneOf(l);
   const pill = i => `<button class="pill ${i.done ? "done" : ""}" data-id="${esc(i.id)}" data-action="toggle" aria-pressed="${i.done}">${esc(i.text)}</button>`;
   let body = pend.map(pill).join("");
@@ -428,6 +453,7 @@ function editHTML(l){
   const rows = l.items.map(i => `<div class="row" data-id="${esc(i.id)}">
       <span class="handle" data-drag aria-label="Drag to reorder">${SVG.drag}</span>
       <input class="row-input" id="it-${esc(i.id)}" data-item="${esc(i.id)}" value="${esc(i.text)}" placeholder="Item" autocomplete="off" enterkeyhint="next">
+      ${i.days ? `<button class="daytag" data-action="pickDays" data-id="${esc(i.id)}" title="Shown only on these days">${dayLabel(i.days)}</button>` : ""}
       <button class="iconbtn" data-action="rowMenu" data-id="${esc(i.id)}" aria-label="Item options">${SVG.more}</button>
     </div>`).join("");
   return `<header class="bar"><div class="gutter">
@@ -447,7 +473,7 @@ function editHTML(l){
     <div class="field"><span class="label">Items · ${l.items.length}</span>
       <div class="rows" data-sortable="rows">${rows}</div>
       <div class="edit-actions"><button class="btn" data-action="addItem">${SVG.plus}Add item</button></div>
-      <span class="hint">Drag the handle to reorder. Press Enter in an item to add one below it.</span>
+      <span class="hint">Drag the handle to reorder. Press Enter in an item to add one below it. Use the item menu to show an item only on certain days.</span>
     </div>
     <div class="field"><span class="label">Add several items</span>
       <textarea class="textarea" id="bulk" placeholder="One item per line"></textarea>
@@ -581,7 +607,7 @@ async function resetList(id){
   }
 }
 function cloneList(l){
-  return {id:uid(), name:(l.name || "Untitled") + " copy", icon:l.icon, items:l.items.map(i => ({id:uid(), text:i.text, done:false, doneAt:null}))};
+  return {id:uid(), name:(l.name || "Untitled") + " copy", icon:l.icon, items:l.items.map(i => ({id:uid(), text:i.text, done:false, doneAt:null, days:i.days ? [...i.days] : null}))};
 }
 function duplicateList(id){
   commit(s => { const i = s.lists.findIndex(l => l.id === id); if (i >= 0) s.lists.splice(i + 1, 0, cloneList(s.lists[i])); });
@@ -608,7 +634,30 @@ function moveItem(itemId, d){
   editItems(items => { const i = items.findIndex(x => x.id === itemId), j = i + d; if (i < 0 || j < 0 || j >= items.length) return; [items[i], items[j]] = [items[j], items[i]]; });
 }
 
+let daysItem = null, daysSel = [];
+function daysHTML(){
+  const it = getList(view.id)?.items.find(i => i.id === daysItem);
+  return `<h2>Show on</h2><p>${esc((it && it.text || "Item").toUpperCase())}</p>
+    <div class="seg"><button class="${daysSel.length ? "" : "sel"}" data-action="dayAll">Every day</button>${DAY_ORDER.map(n =>
+      `<button class="${daysSel.includes(n) ? "sel" : ""}" data-action="dayToggle" data-v="${n}">${DAY_SHORT[n]}</button>`).join("")}</div>
+    <div class="dialog-actions"><button class="btn" data-action="dlgCancel">Cancel</button><button class="btn primary" data-action="daysSave">Save</button></div>`;
+}
+function openDays(itemId){
+  const it = getList(view.id)?.items.find(i => i.id === itemId); if (!it) return;
+  daysItem = itemId; daysSel = it.days ? [...it.days] : [];
+  openDialog(daysHTML(), "Show on");
+  dialogRefresh = () => { const d = layer.querySelector(".dialog"); if (d) d.innerHTML = daysHTML(); };
+}
+
 const ACTIONS = {
+  pickDays(t){ openDays(t.dataset.id); },
+  dayAll(){ daysSel = []; dialogRefresh && dialogRefresh(); },
+  dayToggle(t){ const n = +t.dataset.v; daysSel = daysSel.includes(n) ? daysSel.filter(x => x !== n) : [...daysSel, n]; dialogRefresh && dialogRefresh(); },
+  daysSave(){
+    const lid = view.id, iid = daysItem, days = normDays(daysSel);
+    closeDialog();
+    commit(s => { const it = getList(lid, s)?.items.find(i => i.id === iid); if (it) it.days = days; });
+  },
   home(){ go({screen:"home"}); },
   open(t){ if (!arrange) go({screen:"list", id:t.dataset.id}); },
   toggle(t){ toggleItem(t.dataset.id); },
@@ -663,7 +712,8 @@ const ACTIONS = {
       ...(idx > 0 ? [{label:"Move up", fn:() => moveItem(id, -1)}] : []),
       ...(idx < l.items.length - 1 ? [{label:"Move down", fn:() => moveItem(id, 1)}] : []),
       {label:"Insert item below", fn:() => insertAfter(id)},
-      {label:"Duplicate", fn:() => { const nid = uid(); editItems(items => { const i = items.findIndex(x => x.id === id); items.splice(i + 1, 0, {id:nid, text:items[i].text, done:false, doneAt:null}); }); }},
+      {label:"Duplicate", fn:() => { const nid = uid(); editItems(items => { const i = items.findIndex(x => x.id === id); items.splice(i + 1, 0, {id:nid, text:items[i].text, done:false, doneAt:null, days:items[i].days ? [...items[i].days] : null}); }); }},
+      {label:it.days ? "Days: " + dayLabel(it.days) : "Days: every day", fn:() => openDays(id)},
       {label:"Delete", danger:true, fn:() => editItems(items => { const i = items.findIndex(x => x.id === id); if (i >= 0) items.splice(i, 1); })}
     ]);
   },
@@ -745,7 +795,8 @@ document.addEventListener("pointerdown", e => {
 });
 
 /* Timer checks: every second while open, and whenever the page becomes active again */
-setInterval(() => { checkExpiry(); updateCountdown(); }, 1000);
+let shownDay = today();
+setInterval(() => { checkExpiry(); updateCountdown(); if (today() !== shownDay) { shownDay = today(); if (view.screen !== "edit" && layer.hidden) render(); } }, 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { checkExpiry(); updateCountdown(); } });
 window.addEventListener("focus", () => { checkExpiry(); updateCountdown(); });
 window.addEventListener("pageshow", () => { checkExpiry(); updateCountdown(); });
