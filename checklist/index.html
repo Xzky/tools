@@ -281,8 +281,13 @@ const showsToday = i => {
   if (i.days.includes(now.getDay())) return true;
   return i.days.includes(WEEK_START) && weekStartDay(now) === ymd(now);
 };
-const normAlt = a => { if (!a || typeof a !== "object") return null; const days = normDays(a.days), text = String(a.text ?? "").trim(); return days && text ? {days, text} : null; };
-const altToday = i => i.alt && i.alt.days.includes(new Date().getDay()) ? i.alt.text : null;
+const normAlt = a => {
+  if (!a || typeof a !== "object") return null;
+  const days = normDays(a.days) || [], dates = normDates(a.dates), text = String(a.text ?? "").trim();
+  return text && (days.length || dates.length) ? {days, dates, text} : null;
+};
+const altLabel = a => [dayLabel(a.days), ...(a.dates || []).filter(x => x >= ymd(new Date())).map(shortDate)].filter(Boolean).join(", ");
+const altToday = i => i.alt && (i.alt.days.includes(new Date().getDay()) || (i.alt.dates || []).includes(ymd(new Date()))) ? i.alt.text : null;
 function normalize(d){
   const s = blankState();
   if (!d || typeof d !== "object") return s;
@@ -364,7 +369,7 @@ const DEFAULT_LISTS = [
   {name:"Bedtime", icon:"🌙", items:["Kids pajamas","Kids brush teeth","School bags ready","Clothes for tomorrow","Phones charging","Front door locked"]}
 ];
 /* One-time additions to existing saved data (run once per browser, never re-added if deleted later) */
-const MIGRATIONS = ["anton-weekday-items", "alex-bag-week-start", "tuesday-big-snack", "anton-roller-2026-11-05"];
+const MIGRATIONS = ["anton-weekday-items", "alex-bag-week-start", "tuesday-big-snack", "anton-roller-2026-11-05", "big-snack-2026-11-05"];
 function migrate(){
   if (!S.migrations.includes("anton-weekday-items")) {
     commit(s => {
@@ -400,6 +405,14 @@ function migrate(){
       const it = l && l.items.find(i => /anton roller/i.test(i.text));
       if (it) it.dates = normDates([...(it.dates || []), "2026-11-05"]);
       s.migrations.push("anton-roller-2026-11-05");
+    });
+  }
+  if (!S.migrations.includes("big-snack-2026-11-05")) {
+    commit(s => {
+      const l = s.lists.find(x => /morning/i.test(x.name)) || s.lists[0];
+      const it = l && l.items.find(i => /prepare snack/i.test(i.text));
+      if (it && it.alt) it.alt.dates = normDates([...(it.alt.dates || []), "2026-11-05"]);
+      s.migrations.push("big-snack-2026-11-05");
     });
   }
 }
@@ -542,7 +555,7 @@ function editHTML(l){
       <input class="row-input" id="it-${esc(i.id)}" data-item="${esc(i.id)}" value="${esc(i.text)}" placeholder="Item" autocomplete="off" enterkeyhint="next">
       ${i.days ? `<button class="daytag" data-action="pickDays" data-id="${esc(i.id)}" title="Shown only on these days">${dayLabel(i.days)}</button>` : ""}
       ${i.days && i.dates && i.dates.some(x => x >= ymd(new Date())) ? `<button class="daytag" data-action="pickDates" data-id="${esc(i.id)}" title="Also shown on these dates">+ ${i.dates.filter(x => x >= ymd(new Date())).map(shortDate).join(", ")}</button>` : ""}
-      ${i.alt ? `<button class="daytag" data-action="pickAlt" data-id="${esc(i.id)}" title="${esc(dayLabel(i.alt.days) + ": " + i.alt.text)}">${dayLabel(i.alt.days)} text</button>` : ""}
+      ${i.alt ? `<button class="daytag" data-action="pickAlt" data-id="${esc(i.id)}" title="${esc(altLabel(i.alt) + ": " + i.alt.text)}">${esc(altLabel(i.alt))} text</button>` : ""}
       <button class="iconbtn" data-action="rowMenu" data-id="${esc(i.id)}" aria-label="Item options">${SVG.more}</button>
     </div>`).join("");
   return `<header class="bar"><div class="gutter">
@@ -704,7 +717,7 @@ async function resetList(id){
   }
 }
 function cloneList(l){
-  return {id:uid(), name:(l.name || "Untitled") + " copy", icon:l.icon, items:l.items.map(i => ({id:uid(), text:i.text, done:false, doneAt:null, days:i.days ? [...i.days] : null, alt:i.alt ? {days:[...i.alt.days], text:i.alt.text} : null, dates:[...(i.dates || [])]}))};
+  return {id:uid(), name:(l.name || "Untitled") + " copy", icon:l.icon, items:l.items.map(i => ({id:uid(), text:i.text, done:false, doneAt:null, days:i.days ? [...i.days] : null, alt:i.alt ? {days:[...i.alt.days], dates:[...(i.alt.dates || [])], text:i.alt.text} : null, dates:[...(i.dates || [])]}))};
 }
 function duplicateList(id){
   commit(s => { const i = s.lists.findIndex(l => l.id === id); if (i >= 0) s.lists.splice(i + 1, 0, cloneList(s.lists[i])); });
@@ -750,6 +763,9 @@ function altHTML(){
     <div class="field"><span class="label">Show this text instead</span>
       <input class="input" id="alt-text" value="${esc(it && it.alt ? it.alt.text : "")}" placeholder="BIG SNACK (Roller)" autocomplete="off">
       <span class="hint">Shown exactly as typed, including lower case letters.</span></div>
+    <div class="field"><span class="label">Also on these dates</span>
+      <textarea class="textarea daysoff" id="alt-dates" placeholder="05/11/2026">${esc(it && it.alt ? (it.alt.dates || []).filter(x => x >= ymd(new Date())).map(x => x.split("-").reverse().join("/")).join("\n") : "")}</textarea>
+      <span class="hint">One date per line, DD/MM/YYYY. Past dates are removed automatically.</span></div>
     <div class="dialog-actions">${it && it.alt ? `<button class="btn danger" data-action="altRemove">Remove</button>` : ""}<button class="btn" data-action="dlgCancel">Cancel</button><button class="btn primary" data-action="altSave">Save</button></div>`;
 }
 let datesItem = null;
@@ -789,7 +805,9 @@ const ACTIONS = {
     t.classList.toggle("sel", altSel.includes(n));
   },
   altSave(){
-    const lid = view.id, iid = altItem, alt = normAlt({days:altSel, text:(document.getElementById("alt-text") || {}).value});
+    const tdy = ymd(new Date());
+    const dates = ((document.getElementById("alt-dates") || {}).value || "").split(/\r?\n/).map(parseDate).filter(d => d && !isNaN(d)).map(ymd).filter(x => x >= tdy);
+    const lid = view.id, iid = altItem, alt = normAlt({days:altSel, dates, text:(document.getElementById("alt-text") || {}).value});
     closeDialog();
     commit(s => { const it = getList(lid, s)?.items.find(i => i.id === iid); if (it) it.alt = alt; });
   },
@@ -856,10 +874,10 @@ const ACTIONS = {
       ...(idx > 0 ? [{label:"Move up", fn:() => moveItem(id, -1)}] : []),
       ...(idx < l.items.length - 1 ? [{label:"Move down", fn:() => moveItem(id, 1)}] : []),
       {label:"Insert item below", fn:() => insertAfter(id)},
-      {label:"Duplicate", fn:() => { const nid = uid(); editItems(items => { const i = items.findIndex(x => x.id === id); items.splice(i + 1, 0, {id:nid, text:items[i].text, done:false, doneAt:null, days:items[i].days ? [...items[i].days] : null, alt:items[i].alt ? {days:[...items[i].alt.days], text:items[i].alt.text} : null, dates:[...(items[i].dates || [])]}); }); }},
+      {label:"Duplicate", fn:() => { const nid = uid(); editItems(items => { const i = items.findIndex(x => x.id === id); items.splice(i + 1, 0, {id:nid, text:items[i].text, done:false, doneAt:null, days:items[i].days ? [...items[i].days] : null, alt:items[i].alt ? {days:[...items[i].alt.days], dates:[...(items[i].alt.dates || [])], text:items[i].alt.text} : null, dates:[...(items[i].dates || [])]}); }); }},
       {label:it.days ? "Days: " + dayLabel(it.days) : "Days: every day", fn:() => openDays(id)},
       ...(it.days ? [{label:"Extra dates" + (it.dates && it.dates.length ? ": " + it.dates.filter(x => x >= ymd(new Date())).map(shortDate).join(", ") : ""), fn:() => openDates(id)}] : []),
-      {label:it.alt ? "Different text: " + dayLabel(it.alt.days) : "Different text on some days", fn:() => openAlt(id)},
+      {label:it.alt ? "Different text: " + altLabel(it.alt) : "Different text on some days", fn:() => openAlt(id)},
       {label:"Delete", danger:true, fn:() => editItems(items => { const i = items.findIndex(x => x.id === id); if (i >= 0) items.splice(i, 1); })}
     ]);
   },
