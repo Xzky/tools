@@ -128,6 +128,7 @@ button{cursor:pointer;background:none;border:0;padding:0}
 .row-input{flex:1;min-width:0;background:transparent;border:0;outline:none;padding:10px 6px;font-size:15px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-stretch:94%}
 .row-input::placeholder{color:var(--faint);text-transform:none;letter-spacing:0;font-weight:400}
 .row .iconbtn{flex-shrink:0}
+.textarea.daysoff{min-height:96px;text-transform:none;letter-spacing:0;font-family:var(--font-mono);font-size:14px}
 .daytag{flex-shrink:0;font:500 10.5px/1 var(--font-mono);letter-spacing:.08em;color:var(--accent);text-transform:uppercase;padding:6px 8px;border-radius:999px;border:1px solid var(--line-strong);white-space:nowrap}
 .edit-actions{display:flex;flex-wrap:wrap;gap:10px}
 .hint{color:var(--muted);font-size:13px;line-height:1.45}
@@ -216,13 +217,65 @@ const SVG = {
 
 /* ---------- Data model ---------- */
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
-const blankState = () => ({v:1, lists:[], settings:{theme:"ultra", accent:null, timeoutMin:120}, lastActivity:null, lastResetAt:null, updatedAt:0, migrations:[]});
+const blankState = () => ({v:1, lists:[], settings:{theme:"ultra", accent:null, timeoutMin:120, daysOffText:""}, lastActivity:null, lastResetAt:null, updatedAt:0, migrations:[]});
 const DAY_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const DAY_ORDER = [1,2,3,4,5,6,0];
-const normDays = d => { if (!Array.isArray(d)) return null; const x = [...new Set(d.map(Number).filter(n => n >= 0 && n <= 6))]; return x.length && x.length < 7 ? x.sort() : null; };
-const dayLabel = d => d && d.length ? DAY_ORDER.filter(n => d.includes(n)).map(n => DAY_SHORT[n]).join(" ") : "";
+/* Day value 7 = "first school day of the week": Monday, or the next weekday that is not a day off */
+const WEEK_START = 7;
+const normDays = d => {
+  if (!Array.isArray(d)) return null;
+  const x = [...new Set(d.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n <= 7))];
+  const week = x.filter(n => n < 7);
+  if (!x.length || (week.length === 7)) return null;
+  return x.sort((a, b) => a - b);
+};
+const dayLabel = d => d && d.length ? [...DAY_ORDER.filter(n => d.includes(n)).map(n => DAY_SHORT[n]), ...(d.includes(WEEK_START) ? ["Week start"] : [])].join(" ") : "";
 const today = () => new Date().getDay();
-const showsToday = i => !i.days || i.days.includes(today());
+
+/* Public holidays: Comunidad de Madrid (regional calendar, includes national days) and Majadahonda (local) */
+const HOLIDAYS = new Set([
+  // 2026 Comunidad de Madrid
+  "2026-01-01","2026-01-06","2026-04-02","2026-04-03","2026-05-01","2026-05-02","2026-08-15","2026-10-12","2026-11-02","2026-12-07","2026-12-08","2026-12-25",
+  // 2026 Majadahonda
+  "2026-09-14","2026-11-25",
+  // 2027 Comunidad de Madrid (Decreto 82/2026). Majadahonda 2027 local days not yet published: add them in Settings
+  "2027-01-01","2027-01-06","2027-03-19","2027-03-25","2027-03-26","2027-05-01","2027-08-16","2027-10-12","2027-11-01","2027-12-06","2027-12-08","2027-12-25"
+]);
+const ymd = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+/* Extra days off typed by the user: one per line, DD/MM/YYYY or a range DD/MM/YYYY - DD/MM/YYYY (also accepts YYYY-MM-DD) */
+function parseDate(t){
+  t = t.trim(); let m;
+  if ((m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return new Date(+m[1], +m[2] - 1, +m[3]);
+  if ((m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/))) return new Date(+m[3] < 100 ? 2000 + +m[3] : +m[3], +m[2] - 1, +m[1]);
+  return null;
+}
+let extraCache = {text:null, set:new Set(), bad:0};
+function extraDaysOff(){
+  const text = (S.settings.daysOffText || "");
+  if (extraCache.text === text) return extraCache;
+  const set = new Set(); let bad = 0;
+  text.split(/\r?\n/).map(l => l.replace(/#.*/, "").trim()).filter(Boolean).forEach(line => {
+    const parts = line.split(/\s+(?:-|to|a|hasta)\s+|\s*–\s*/i);
+    const a = parseDate(parts[0]), b = parts[1] ? parseDate(parts[1]) : a;
+    if (!a || !b || isNaN(a) || isNaN(b) || b < a || (b - a) > 400 * 864e5) { bad++; return; }
+    for (const d = new Date(a); d <= b; d.setDate(d.getDate() + 1)) set.add(ymd(d));
+  });
+  extraCache = {text, set, bad};
+  return extraCache;
+}
+const isDayOff = d => d.getDay() === 0 || d.getDay() === 6 || HOLIDAYS.has(ymd(d)) || extraDaysOff().set.has(ymd(d));
+/* First weekday (Monday to Friday) of this week that is not a day off, or null if the whole week is off */
+function weekStartDay(now = new Date()){
+  const mon = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+  for (let i = 0; i < 5; i++) { const d = new Date(mon); d.setDate(mon.getDate() + i); if (!isDayOff(d)) return ymd(d); }
+  return null;
+}
+const showsToday = i => {
+  if (!i.days) return true;
+  const now = new Date();
+  if (i.days.includes(now.getDay())) return true;
+  return i.days.includes(WEEK_START) && weekStartDay(now) === ymd(now);
+};
 function normalize(d){
   const s = blankState();
   if (!d || typeof d !== "object") return s;
@@ -234,6 +287,7 @@ function normalize(d){
   s.settings.theme = THEMES.some(t => t.id === st.theme) ? st.theme : "ultra";
   s.settings.accent = typeof st.accent === "string" ? st.accent : null;
   s.settings.timeoutMin = TIMEOUTS.some(t => t.m === st.timeoutMin) ? st.timeoutMin : 120;
+  s.settings.daysOffText = typeof st.daysOffText === "string" ? st.daysOffText : "";
   s.lastActivity = Number(d.lastActivity) || null;
   s.lastResetAt = Number(d.lastResetAt) || null;
   s.updatedAt = Number(d.updatedAt) || 0;
@@ -298,12 +352,12 @@ function setSync(v){
 }
 
 const DEFAULT_LISTS = [
-  {name:"Morning routine", icon:"☀️", items:["adri prepare breakfast","adri prepare coffee and tea","kids make the bed","kids Brush teeth, wash face","kids change clothes","kids eat breakfast","adri prepare snack","adri prepare water bottle","adri comb hairs","adri puts sunscreen",{text:"Anton Roller Skates", days:[2]},{text:"Anton Flute", days:[4]}]},
+  {name:"Morning routine", icon:"☀️", items:["adri prepare breakfast","adri prepare coffee and tea","kids make the bed","kids Brush teeth, wash face","kids change clothes","kids eat breakfast","adri prepare snack","adri prepare water bottle","adri comb hairs","adri puts sunscreen",{text:"Anton Roller Skates", days:[2]},{text:"Anton Flute", days:[4]},{text:"Alex bag", days:[7]}]},
   {name:"Leaving the house", icon:"🔑", items:["Keys","Wallet","Phone","Laptop and charger","Lights off","Windows closed","Door locked"]},
   {name:"Bedtime", icon:"🌙", items:["Kids pajamas","Kids brush teeth","School bags ready","Clothes for tomorrow","Phones charging","Front door locked"]}
 ];
 /* One-time additions to existing saved data (run once per browser, never re-added if deleted later) */
-const MIGRATIONS = ["anton-weekday-items"];
+const MIGRATIONS = ["anton-weekday-items", "alex-bag-week-start"];
 function migrate(){
   if (!S.migrations.includes("anton-weekday-items")) {
     commit(s => {
@@ -313,6 +367,16 @@ function migrate(){
         if (it) it.days = days; else l.items.push({id:uid(), text, done:false, doneAt:null, days});
       });
       s.migrations.push("anton-weekday-items");
+    });
+  }
+  if (!S.migrations.includes("alex-bag-week-start")) {
+    commit(s => {
+      const l = s.lists.find(x => /morning/i.test(x.name)) || s.lists[0];
+      if (l) {
+        const it = l.items.find(i => i.text.trim().toLowerCase() === "alex bag");
+        if (it) it.days = [WEEK_START]; else l.items.push({id:uid(), text:"Alex bag", done:false, doneAt:null, days:[WEEK_START]});
+      }
+      s.migrations.push("alex-bag-week-start");
     });
   }
 }
@@ -572,9 +636,17 @@ function settingsHTML(){
     <div class="field"><span class="label">Automatic reset after inactivity</span><div class="seg">${TIMEOUTS.map(t =>
       `<button class="${t.m === st.timeoutMin ? "sel" : ""}" data-action="setTimeout" data-v="${t.m}">${t.l}</button>`).join("")}</div>
       <span class="hint">Only ticking or unticking an item restarts the timer. When it runs out, every checklist returns to pending.</span></div>
+    <div class="field"><span class="label">Extra days off</span>
+      <textarea class="textarea daysoff" id="daysoff" placeholder="25/11/2027&#10;21/12/2026 - 07/01/2027">${esc(st.daysOffText || "")}</textarea>
+      <span class="hint" id="daysoff-hint">${daysOffHint()}</span></div>
     <div class="status"><span class="dot ${statusMap[0]}"></span><span><b>${statusMap[1]}</b> ${statusMap[2]}</span></div>
     <button class="btn danger block" data-action="resetAll">Reset all checklists</button>
     <div class="dialog-actions"><button class="btn" data-action="dlgCancel">Close</button></div>`;
+}
+function daysOffHint(){
+  const e = extraDaysOff(), ws = weekStartDay();
+  const next = ws ? new Date(ws + "T12:00:00").toLocaleDateString("en-GB", {weekday:"long", day:"numeric", month:"long"}) : "none (the whole week is off)";
+  return `Public holidays for the Comunidad de Madrid (2026 and 2027) and Majadahonda (2026) are built in. Add other days off here, such as school breaks or Majadahonda's 2027 local days: one date per line, or a range. ${e.bad ? `<b>${e.bad} line${e.bad === 1 ? "" : "s"} not understood.</b> ` : ""}First school day this week: <b>${esc(next)}</b>.`;
 }
 function openSettings(){
   openDialog(settingsHTML(), "Settings");
@@ -640,6 +712,8 @@ function daysHTML(){
   return `<h2>Show on</h2><p>${esc((it && it.text || "Item").toUpperCase())}</p>
     <div class="seg"><button class="${daysSel.length ? "" : "sel"}" data-action="dayAll">Every day</button>${DAY_ORDER.map(n =>
       `<button class="${daysSel.includes(n) ? "sel" : ""}" data-action="dayToggle" data-v="${n}">${DAY_SHORT[n]}</button>`).join("")}</div>
+    <div class="seg"><button class="${daysSel.includes(WEEK_START) ? "sel" : ""}" data-action="dayToggle" data-v="${WEEK_START}">First school day of the week</button></div>
+    <span class="hint">First school day of the week is Monday, or the next weekday when Monday is a public holiday in the Comunidad de Madrid or Majadahonda, or a day off you added in Settings.</span>
     <div class="dialog-actions"><button class="btn" data-action="dlgCancel">Cancel</button><button class="btn primary" data-action="daysSave">Save</button></div>`;
 }
 function openDays(itemId){
@@ -743,6 +817,11 @@ document.addEventListener("input", e => {
   if (el.dataset && el.dataset.item) {
     const lid = view.id, iid = el.dataset.item, v = el.value;
     commit(s => { const it = getList(lid, s)?.items.find(i => i.id === iid); if (it) it.text = v; }, {rerender:false, delay:700});
+  } else if (el.id === "daysoff") {
+    const v = el.value;
+    commit(s => { s.settings.daysOffText = v; }, {rerender:false, delay:700});
+    const h = document.getElementById("daysoff-hint"); if (h) h.innerHTML = daysOffHint();
+    render();
   } else if (el.id === "ed-name") {
     const lid = view.id, v = el.value;
     commit(s => { const l = getList(lid, s); if (l) l.name = v; }, {rerender:false, delay:700});
